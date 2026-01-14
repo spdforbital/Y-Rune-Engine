@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Thunder</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        canvas {
+            display: block;
+            cursor: pointer;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+            user-select: none;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 300;
+            letter-spacing: 0.1rem;
+            text-transform: uppercase;
+        }
+
+        p {
+            margin: 5px 0 0;
+            font-size: 0.8rem;
+            opacity: 0.6;
+        }
+
+        #flash {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: white;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.05s ease-out;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="flash"></div>
+    <div id="ui">
+        <h1>Procedural Thunder</h1>
+        <p>Click to strike</p>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const flash = document.getElementById('flash');
+
+        let width, height;
+        let lightning = [];
+
+        // Audio Context Setup
+        let audioCtx = null;
+
+        function initAudio() {
+            if (audioCtx) return;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function createNoiseBuffer(type) {
+            const bufferSize = audioCtx.sampleRate * 4; // 4 seconds of noise
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const output = buffer.getChannelData(0);
+
+            if (type === 'white') {
+                for (let i = 0; i < bufferSize; i++) {
+                    output[i] = Math.random() * 2 - 1;
+                }
+            } else if (type === 'brown') {
+                let lastOut = 0;
+                for (let i = 0; i < bufferSize; i++) {
+                    const white = Math.random() * 2 - 1;
+                    // Improved brown noise filter
+                    output[i] = (lastOut + (0.05 * white)) / 1.05;
+                    lastOut = output[i];
+                    output[i] *= 12; // Compensate for volume loss in filtering
+                }
+
+                // Extra low-pass post-process for even deeper brown noise
+                let prev = 0;
+                for (let i = 0; i < bufferSize; i++) {
+                    output[i] = (prev + output[i]) / 2;
+                    prev = output[i];
+                }
+            }
+            return buffer;
+        }
+
+        const brownBuffer = null;
+        const whiteBuffer = null;
+
+        function getBrownBuffer() {
+            return brownBuffer || createNoiseBuffer('brown');
+        }
+
+        function getWhiteBuffer() {
+            return whiteBuffer || createNoiseBuffer('white');
+        }
+
+        function playThunderSound(distance, branches) {
+            if (!audioCtx) return;
+
+            // distance is 0 to 1 (0 = close, 1 = far)
+            const speedOfSoundScale = 3.0; // Seconds delay for max distance
+            const delay = distance * speedOfSoundScale;
+
+            // 1. Bass Boom (The "Thump" you feel)
+            // Only for close strikes
+            if (distance < 0.6) {
+                const boomOsc = audioCtx.createOscillator();
+                const boomGain = audioCtx.createGain();
+
+                boomOsc.type = 'sine';
+                boomOsc.frequency.setValueAtTime(80, audioCtx.currentTime + delay);
+                boomOsc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + delay + 0.5);
+
+                const boomVol = (1 - distance) * 0.8;
+                boomGain.gain.setValueAtTime(0, audioCtx.currentTime + delay);
+                boomGain.gain.linearRampToValueAtTime(boomVol, audioCtx.currentTime + delay + 0.05);
+                boomGain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + delay + 1.0);
+
+                boomOsc.connect(boomGain);
+                boomGain.connect(audioCtx.destination);
+
+                boomOsc.start(audioCtx.currentTime + delay);
+                boomOsc.stop(audioCtx.currentTime + delay + 1.5);
+            }
+
+            // 2. Initial Crack/Snap
+            if (distance < 0.5) {
+                const crackSource = audioCtx.createBufferSource();
+                crackSource.buffer = getWhiteBuffer();
+
+                const crackFilter = audioCtx.createBiquadFilter();
+                crackFilter.type = 'highpass';
+                crackFilter.frequency.setValueAtTime(400, audioCtx.currentTime + delay);
+
+                const crackGain = audioCtx.createGain();
+                const crackVol = (1 - distance) * 0.6;
+                crackGain.gain.setValueAtTime(0, audioCtx.currentTime + delay);
+                crackGain.gain.linearRampToValueAtTime(crackVol, audioCtx.currentTime + delay + 0.01);
+                crackGain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + delay + 0.2);
+
+                crackSource.connect(crackFilter);
+                crackFilter.connect(crackGain);
+                crackGain.connect(audioCtx.destination);
+
+                crackSource.start(audioCtx.currentTime + delay);
+            }
+
+            // 3. Rolling Rumble
+            // We create multiple "puffs" of sound to simulate the long channel
+            const numPuffs = 8 + Math.floor(branches / 2);
+            const totalDuration = 3 + (1 - distance) * 5;
+
+            for (let i = 0; i < numPuffs; i++) {
+                const rumbleSource = audioCtx.createBufferSource();
+                rumbleSource.buffer = getBrownBuffer();
+
+                const rumbleGain = audioCtx.createGain();
+                const rumbleFilter = audioCtx.createBiquadFilter();
+
+                // Scatter the puffs in time
+                const scatter = (i / numPuffs) * totalDuration * 0.8 + (Math.random() * 0.5);
+                const puffTime = audioCtx.currentTime + delay + scatter;
+
+                // Frequency content drops with distance and time
+                rumbleFilter.type = 'lowpass';
+                const startFreq = (1 - distance) * 600 + 100;
+                rumbleFilter.frequency.setValueAtTime(startFreq, puffTime);
+                rumbleFilter.frequency.exponentialRampToValueAtTime(40, puffTime + 2.0);
+
+                // Randomize intensity of each puff
+                const puffVol = (Math.random() * 0.5 + 0.5) * (0.4 / numPuffs) * (1 - (i / numPuffs) * 0.5);
+
+                rumbleGain.gain.setValueAtTime(0, puffTime);
+                rumbleGain.gain.linearRampToValueAtTime(puffVol, puffTime + 0.2 + Math.random() * 0.3);
+                rumbleGain.gain.exponentialRampToValueAtTime(0.001, puffTime + 1.5 + Math.random() * 2);
+
+                rumbleSource.connect(rumbleFilter);
+                rumbleFilter.connect(rumbleGain);
+                rumbleGain.connect(audioCtx.destination);
+
+                rumbleSource.start(puffTime, Math.random() * 2); // Start at random offset in buffer
+            }
+        }
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            ctx.fillStyle = '#050510';
+            ctx.fillRect(0, 0, width, height);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        class LightningSegment {
+            constructor(x1, y1, x2, y2, thickness, opacity) {
+                this.x1 = x1;
+                this.y1 = y1;
+                this.x2 = x2;
+                this.y2 = y2;
+                this.thickness = thickness;
+                this.opacity = opacity;
+            }
+
+            draw(context) {
+                context.beginPath();
+                context.moveTo(this.x1, this.y1);
+                context.lineTo(this.x2, this.y2);
+                context.lineWidth = this.thickness;
+                context.strokeStyle = `rgba(200, 220, 255, ${this.opacity})`;
+                context.lineCap = 'round';
+                context.stroke();
+
+                // Core glow
+                context.beginPath();
+                context.moveTo(this.x1, this.y1);
+                context.lineTo(this.x2, this.y2);
+                context.lineWidth = this.thickness * 0.4;
+                context.strokeStyle = `rgba(255, 255, 255, ${this.opacity})`;
+                context.stroke();
+            }
+        }
+
+        class Bolt {
+            constructor(startX, startY, endX, endY, isMain = true) {
+                this.segments = [];
+                this.opacity = 1.0;
+                this.branchCount = 0;
+                this.generate(startX, startY, endX, endY, isMain ? 10 : 6, isMain ? 60 : 30, isMain);
+
+                if (isMain) {
+                    // Estimate distance based on start position relative to center
+                    const distFactor = Math.abs(startX - width / 2) / (width / 2); // 0 to 1
+                    // Add some random depth distance
+                    const distance = Math.sqrt(distFactor * distFactor + Math.pow(Math.random(), 2));
+                    playThunderSound(Math.min(1, distance), this.branchCount);
+                }
+            }
+
+            generate(x1, y1, x2, y2, divisions, jitter, isMain) {
+                const points = [[x1, y1], [x2, y2]];
+
+                for (let i = 0; i < divisions; i++) {
+                    for (let j = points.length - 1; j > 0; j--) {
+                        const p1 = points[j - 1];
+                        const p2 = points[j];
+
+                        const mx = (p1[0] + p2[0]) / 2;
+                        const my = (p1[1] + p2[1]) / 2;
+
+                        const dx = p2[0] - p1[0];
+                        const dy = p2[1] - p1[1];
+                        const len = Math.sqrt(dx * dx + dy * dy);
+
+                        const nx = -dy / len;
+                        const ny = dx / len;
+
+                        const displace = (Math.random() - 0.5) * jitter * (len / 100);
+                        const newPoint = [mx + nx * displace, my + ny * displace];
+
+                        points.splice(j, 0, newPoint);
+                    }
+                    jitter *= 0.5;
+                }
+
+                for (let i = 0; i < points.length - 1; i++) {
+                    const p1 = points[i];
+                    const p2 = points[i + 1];
+                    const thickness = isMain ? 3 : 1.2;
+                    this.segments.push(new LightningSegment(p1[0], p1[1], p2[0], p2[1], thickness, 1));
+
+                    // Branching logic - branches can also branch
+                    if (isMain && Math.random() < 0.12) {
+                        this.branchCount++;
+                        const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+                        const branchAngle = angle + (Math.random() - 0.5) * Math.PI * 0.6;
+                        const branchLength = (Math.random() * 150 + 50) * (1 - i / points.length);
+                        const bx2 = p1[0] + Math.cos(branchAngle) * branchLength;
+                        const by2 = p1[1] + Math.sin(branchAngle) * branchLength;
+
+                        this.generate(p1[0], p1[1], bx2, by2, 4, 20, false);
+                    } else if (!isMain && Math.random() < 0.05) {
+                        // Tiny sub-branches
+                        this.branchCount++;
+                        const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+                        const branchAngle = angle + (Math.random() - 0.5) * Math.PI * 0.4;
+                        const branchLength = (Math.random() * 50 + 20);
+                        const bx2 = p1[0] + Math.cos(branchAngle) * branchLength;
+                        const by2 = p1[1] + Math.sin(branchAngle) * branchLength;
+                        this.generate(p1[0], p1[1], bx2, by2, 2, 10, false);
+                    }
+                }
+            }
+
+            update() {
+                this.opacity -= 0.035;
+                return this.opacity > 0;
+            }
+
+            draw(context) {
+                context.save();
+                context.shadowBlur = 20;
+                context.shadowColor = 'rgba(74, 158, 255, ' + this.opacity + ')';
+                this.segments.forEach(s => {
+                    const originalOpacity = s.opacity;
+                    s.opacity *= this.opacity;
+                    s.draw(context);
+                    s.opacity = originalOpacity;
+                });
+                context.restore();
+            }
+        }
+
+        function triggerStrike(x, y) {
+            initAudio();
+            const startX = x !== undefined ? x : Math.random() * width;
+            const startY = 0;
+            const endX = startX + (Math.random() - 0.5) * width * 0.5;
+            const endY = height;
+
+            lightning.push(new Bolt(startX, startY, endX, endY));
+
+            // Camera flash
+            flash.style.opacity = '0.2';
+            setTimeout(() => {
+                flash.style.opacity = '0';
+            }, 60);
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            triggerStrike(e.clientX, e.clientY);
+        });
+
+        function animate() {
+            // Motion blur effect
+            ctx.fillStyle = 'rgba(5, 5, 16, 0.15)';
+            ctx.fillRect(0, 0, width, height);
+
+            lightning = lightning.filter(bolt => {
+                const alive = bolt.update();
+                if (alive) bolt.draw(ctx);
+                return alive;
+            });
+
+            // Random strikes with lower probability to avoid clutter
+            if (Math.random() < 0.015) {
+                triggerStrike();
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+
+</html>
