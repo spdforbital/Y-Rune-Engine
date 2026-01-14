@@ -1,0 +1,182 @@
+#version 460
+
+/*
+ * Light Culling Compute Shader for Forward+ Clustered Lighting
+ * 
+ * Divides the frustum into 3D clusters (tiles * depth slices) and
+ * assigns each light to the clusters it affects.
+ */
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Light structure matching Rust GpuLight
+struct Light {
+    vec4 position;     // xyz = pos, w = radius
+    vec4 direction;    // xyz = dir (spot), w = spot outer angle cos
+    vec4 color;        // rgb = color, a = intensity
+    uint light_type;   // 0 = point, 1 = spot
+    float spot_inner;
+    uint _pad0;
+    uint _pad1;
+};
+
+// Cluster info (offset into light index array + count)
+struct ClusterInfo {
+    uint offset;
+    uint count;
+};
+
+layout(std430, binding = 0) readonly buffer LightBuffer {
+    Light lights[];
+};
+
+layout(std430, binding = 1) buffer ClusterInfoBuffer {
+    ClusterInfo cluster_info[];
+};
+
+layout(std430, binding = 2) buffer LightIndexBuffer {
+    uint light_indices[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 view;
+    mat4 proj;
+    uvec2 cluster_size;  // tile size in pixels
+    uvec2 screen_size;
+    uint light_count;
+    uint depth_slices;
+    float near_plane;
+    float far_plane;
+} pc;
+
+const uint MAX_LIGHTS_PER_CLUSTER = 256;
+const uint LIGHT_TYPE_POINT = 0;
+const uint LIGHT_TYPE_SPOT = 1;
+
+// Compute linear depth from clip Z using logarithmic distribution
+float linearize_depth(float z) {
+    return pc.near_plane * pow(pc.far_plane / pc.near_plane, z);
+}
+
+// Compute cluster's AABB in view space
+void get_cluster_aabb(uvec3 cluster_id, out vec3 aabb_min, out vec3 aabb_max) {
+    // Screen space bounds
+    vec2 tile_min = vec2(cluster_id.xy) * vec2(pc.cluster_size);
+    vec2 tile_max = tile_min + vec2(pc.cluster_size);
+    
+    // Clamp to screen
+    tile_max = min(tile_max, vec2(pc.screen_size));
+    
+    // Depth bounds (logarithmic slicing)
+    float z_near = linearize_depth(float(cluster_id.z) / float(pc.depth_slices));
+    float z_far = linearize_depth(float(cluster_id.z + 1) / float(pc.depth_slices));
+    
+    // Convert screen corners to view space at z_near plane
+    vec2 ndc_min = (tile_min / vec2(pc.screen_size)) * 2.0 - 1.0;
+    vec2 ndc_max = (tile_max / vec2(pc.screen_size)) * 2.0 - 1.0;
+    
+    // Unproject using inverse projection
+    mat4 inv_proj = inverse(pc.proj);
+    
+    // Corners at near plane
+    vec4 corner0 = inv_proj * vec4(ndc_min.x, -ndc_min.y, 0.0, 1.0);
+    vec4 corner1 = inv_proj * vec4(ndc_max.x, -ndc_max.y, 0.0, 1.0);
+    corner0.xyz /= corner0.w;
+    corner1.xyz /= corner1.w;
+    
+    // Scale to depth range
+    vec3 min_near = corner0.xyz * (z_near / -corner0.z);
+    vec3 max_near = corner1.xyz * (z_near / -corner1.z);
+    vec3 min_far = corner0.xyz * (z_far / -corner0.z);
+    vec3 max_far = corner1.xyz * (z_far / -corner1.z);
+    
+    // Compute AABB
+    aabb_min = min(min(min_near, max_near), min(min_far, max_far));
+    aabb_max = max(max(min_near, max_near), max(min_far, max_far));
+}
+
+// Test if sphere intersects AABB
+bool sphere_intersects_aabb(vec3 center, float radius, vec3 aabb_min, vec3 aabb_max) {
+    vec3 closest = clamp(center, aabb_min, aabb_max);
+    float dist_sq = dot(center - closest, center - closest);
+    return dist_sq <= radius * radius;
+}
+
+// Test if spot light cone intersects AABB (simplified)
+bool spot_intersects_aabb(vec3 pos, vec3 dir, float radius, float cos_angle, vec3 aabb_min, vec3 aabb_max) {
+    // First check sphere intersection
+    if (!sphere_intersects_aabb(pos, radius, aabb_min, aabb_max)) {
+        return false;
+    }
+    
+    // Then check if AABB center is within cone
+    vec3 center = (aabb_min + aabb_max) * 0.5;
+    vec3 to_center = normalize(center - pos);
+    float cos_to_center = dot(dir, to_center);
+    
+    // Use a relaxed cone test (include diagonal)
+    float half_diag = length(aabb_max - aabb_min) * 0.5;
+    float dist = length(center - pos);
+    float sin_aabb = half_diag / max(dist, 0.001);
+    float relaxed_angle = cos_angle - sin_aabb;
+    
+    return cos_to_center >= relaxed_angle;
+}
+
+void main() {
+    uvec3 cluster_id = gl_GlobalInvocationID;
+    
+    // Compute number of clusters
+    uint clusters_x = (pc.screen_size.x + pc.cluster_size.x - 1) / pc.cluster_size.x;
+    uint clusters_y = (pc.screen_size.y + pc.cluster_size.y - 1) / pc.cluster_size.y;
+    
+    // Process all depth slices in this tile
+    for (uint z = 0; z < pc.depth_slices; z++) {
+        uvec3 current_cluster = uvec3(cluster_id.xy, z);
+        
+        // Bounds check
+        if (current_cluster.x >= clusters_x || current_cluster.y >= clusters_y) {
+            continue;
+        }
+        
+        // Compute cluster index
+        uint cluster_idx = current_cluster.x + 
+                          current_cluster.y * clusters_x + 
+                          current_cluster.z * clusters_x * clusters_y;
+        
+        // Get cluster AABB in view space
+        vec3 aabb_min, aabb_max;
+        get_cluster_aabb(current_cluster, aabb_min, aabb_max);
+        
+        // Count lights affecting this cluster
+        uint light_count = 0;
+        uint light_offset = cluster_idx * MAX_LIGHTS_PER_CLUSTER;
+        
+        for (uint i = 0; i < pc.light_count && light_count < MAX_LIGHTS_PER_CLUSTER; i++) {
+            Light light = lights[i];
+            
+            // Transform light position to view space
+            vec3 light_pos = (pc.view * vec4(light.position.xyz, 1.0)).xyz;
+            float radius = light.position.w;
+            
+            bool intersects = false;
+            
+            if (light.light_type == LIGHT_TYPE_POINT) {
+                intersects = sphere_intersects_aabb(light_pos, radius, aabb_min, aabb_max);
+            } else if (light.light_type == LIGHT_TYPE_SPOT) {
+                vec3 light_dir = normalize((pc.view * vec4(light.direction.xyz, 0.0)).xyz);
+                float cos_angle = light.direction.w;
+                intersects = spot_intersects_aabb(light_pos, light_dir, radius, cos_angle, aabb_min, aabb_max);
+            }
+            
+            if (intersects) {
+                light_indices[light_offset + light_count] = i;
+                light_count++;
+            }
+        }
+        
+        // Store cluster info
+        cluster_info[cluster_idx].offset = light_offset;
+        cluster_info[cluster_idx].count = light_count;
+    }
+}

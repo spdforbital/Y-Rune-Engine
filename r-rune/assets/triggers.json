@@ -1,0 +1,14 @@
+[
+  {
+    "id": "welcome_clearing",
+    "region": { "type": "sphere", "center": [0.0, 1.0, 0.0], "radius": 6.0 },
+    "fire": "once",
+    "actions": ["log:Welcome to the clearing!", "flag:met_guide"]
+  },
+  {
+    "id": "bunny_meet",
+    "region": { "type": "sphere", "center": [0.0, 1.0, -3.0], "radius": 3.0 },
+    "fire": "once",
+    "actions": ["log:You found the bunny."]
+  }
+]

@@ -1,0 +1,64 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(triangles) out;
+layout(max_vertices = 8, max_primitives = 12) out;
+
+layout(location = 0) out vec3 v_world[];
+
+layout(push_constant) uniform PushConstants {
+    vec4 camera_pos;
+    vec4 sun_dir;
+    vec4 sun_color;
+    mat4 inv_view_proj; // Still passed, but we use MVP for Vertices
+    mat4 mvp;           // Add MVP for transforming box vertices
+    vec4 wind_params;
+    float time;
+    float cloud_scale;
+    float cloud_density;
+    float cloud_absorption;
+} pc;
+
+void main() {
+    SetMeshOutputsEXT(8, 12);
+
+    float extent = 100000.0;
+    float min_y = -extent;
+    float max_y = extent;
+
+    vec3 positions[8] = vec3[](
+        vec3(-extent, min_y, -extent),
+        vec3( extent, min_y, -extent),
+        vec3( extent, max_y, -extent),
+        vec3(-extent, max_y, -extent),
+        vec3(-extent, min_y,  extent),
+        vec3( extent, min_y,  extent),
+        vec3( extent, max_y,  extent),
+        vec3(-extent, max_y,  extent)
+    );
+
+    // Cube indices (CCW)
+    uint indices[36] = uint[](
+        0, 1, 2, 0, 2, 3, // Back
+        4, 5, 6, 4, 6, 7, // Front
+        0, 4, 7, 0, 7, 3, // Left
+        1, 5, 6, 1, 6, 2, // Right
+        3, 2, 6, 3, 6, 7, // Top
+        0, 1, 5, 0, 5, 4  // Bottom
+    );
+
+    for (uint i = 0; i < 8; i++) {
+        // Center the box on the camera in X and Z
+        vec3 pos = positions[i];
+        pos.x += pc.camera_pos.x;
+        pos.z += pc.camera_pos.z;
+        
+        gl_MeshVerticesEXT[i].gl_Position = pc.mvp * vec4(pos, 1.0);
+        v_world[i] = pos;
+    }
+
+    for (uint i = 0; i < 12; i++) {
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(indices[i*3], indices[i*3+1], indices[i*3+2]);
+    }
+}

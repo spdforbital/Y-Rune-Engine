@@ -1,0 +1,28 @@
+(
+    models: [
+        (
+            path: "assets/floor.obj",
+            offset: (0.0, -0.5, 0.0),
+            scale: 1.0,
+            material_id: 1.0,
+        ),
+    ],
+    ai: [],
+    triggers: [],
+    gui: [
+        (
+            id: "settings_title",
+            text: "Settings Placeholder",
+            position: (0.0, -0.2),
+            scale: 0.8,
+            action: None,
+        ),
+        (
+            id: "back_btn",
+            text: "Back",
+            position: (0.0, 0.2),
+            scale: 0.6,
+            action: Some("load_scene:menu"),
+        ),
+    ],
+)

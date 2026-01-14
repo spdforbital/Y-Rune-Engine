@@ -1,0 +1,136 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 64) in;
+layout(triangles, max_vertices = 256, max_primitives = 128) out;
+
+layout(push_constant) uniform PushConstants {
+    mat4 view_proj;
+    vec4 camera_time;
+    vec4 wind_params;
+    vec4 spawn_params;
+    vec4 drop_params;
+} pc;
+
+layout(location = 0) out vec2 v_uv[];
+layout(location = 1) out float v_alpha[];
+
+const uint DROPS_PER_GROUP = 64u;
+const uint VERTS_PER_DROP = 4u;
+const uint PRIMS_PER_DROP = 2u;
+
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float rand01(uint x) {
+    return float(hash(x)) / 4294967295.0;
+}
+
+void main() {
+    if (pc.drop_params.z <= 0.0 || pc.spawn_params.y <= 0.0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+
+    SetMeshOutputsEXT(DROPS_PER_GROUP * VERTS_PER_DROP, DROPS_PER_GROUP * PRIMS_PER_DROP);
+
+    uint lid = gl_LocalInvocationID.x;
+    uint id = gl_WorkGroupID.x * DROPS_PER_GROUP + lid;
+
+    float r1 = rand01(id * 9781u);
+    float r2 = rand01(id * 6271u + 23u);
+    float r3 = rand01(id * 9127u + 17u);
+    float r4 = rand01(id * 1987u + 59u);
+    float r5 = rand01(id * 3571u + 101u);
+
+    float radius = sqrt(r1) * pc.spawn_params.x;
+    float theta = r2 * 6.2831853;
+    vec2 offset = vec2(cos(theta), sin(theta)) * radius;
+
+    float height = max(pc.spawn_params.y, 0.1);
+    float ground = pc.spawn_params.z;
+    float fall_speed = max(pc.spawn_params.w, 0.1);
+    float base_y = max(ground, pc.camera_time.y - height * 0.3);
+
+    float travel = pc.camera_time.w * fall_speed + r3 * height;
+    float fall_dist = mod(travel, height);
+    float y = base_y + height - fall_dist;
+
+    vec2 wind_dir = vec2(pc.wind_params.x, pc.wind_params.y);
+    float wind_len = length(wind_dir);
+    vec2 wind_norm = wind_len > 0.001 ? wind_dir / wind_len : vec2(0.0);
+    vec2 wind = wind_norm * pc.wind_params.z;
+
+    float fall_time = fall_dist / fall_speed;
+    vec2 drift = wind * fall_time;
+
+    float turbulence = pc.wind_params.w;
+    vec2 jitter = vec2(
+        sin(pc.camera_time.w * 1.7 + r4 * 12.0),
+        cos(pc.camera_time.w * 1.3 + r5 * 9.0)
+    ) * turbulence;
+
+    vec3 pos = vec3(
+        pc.camera_time.x + offset.x + drift.x + jitter.x,
+        y,
+        pc.camera_time.z + offset.y + drift.y + jitter.y
+    );
+
+    vec3 velocity = vec3(wind.x, -fall_speed, wind.y);
+    vec3 vel_dir = normalize(velocity);
+    vec3 view_vec = pc.camera_time.xyz - pos;
+    float view_len = length(view_vec);
+    vec3 view_dir = view_len > 1e-3 ? (view_vec / view_len) : vec3(0.0, 1.0, 0.0);
+
+    vec3 right = cross(vel_dir, view_dir);
+    float right_len = length(right);
+    if (right_len < 1e-3) {
+        right = normalize(cross(vel_dir, vec3(0.0, 1.0, 0.0)));
+    } else {
+        right /= right_len;
+    }
+    float drop_length = pc.drop_params.x * mix(0.7, 1.3, r4);
+    float drop_width = pc.drop_params.y * mix(0.7, 1.3, r5);
+
+    vec3 half_len = vel_dir * (drop_length * 0.5);
+    vec3 half_wid = right * (drop_width * 0.5);
+
+    uint vbase = lid * VERTS_PER_DROP;
+    uint pbase = lid * PRIMS_PER_DROP;
+
+    vec3 v0 = pos - half_wid - half_len;
+    vec3 v1 = pos + half_wid - half_len;
+    vec3 v2 = pos + half_wid + half_len;
+    vec3 v3 = pos - half_wid + half_len;
+
+    gl_MeshVerticesEXT[vbase + 0u].gl_Position = pc.view_proj * vec4(v0, 1.0);
+    gl_MeshVerticesEXT[vbase + 1u].gl_Position = pc.view_proj * vec4(v1, 1.0);
+    gl_MeshVerticesEXT[vbase + 2u].gl_Position = pc.view_proj * vec4(v2, 1.0);
+    gl_MeshVerticesEXT[vbase + 3u].gl_Position = pc.view_proj * vec4(v3, 1.0);
+
+    v_uv[vbase + 0u] = vec2(0.0, 0.0);
+    v_uv[vbase + 1u] = vec2(1.0, 0.0);
+    v_uv[vbase + 2u] = vec2(1.0, 1.0);
+    v_uv[vbase + 3u] = vec2(0.0, 1.0);
+
+    float dist = length(pc.camera_time.xyz - pos);
+    float near_fade = smoothstep(0.5, 1.5, dist);
+    float far_fade = 1.0 - smoothstep(pc.spawn_params.x * 0.7, pc.spawn_params.x, dist);
+    float glint = pow(max(dot(view_dir, -vel_dir), 0.0), 6.0);
+
+    float alpha = pc.drop_params.z * near_fade * far_fade * mix(0.4, 1.0, r1) * (0.35 + glint);
+
+    v_alpha[vbase + 0u] = alpha;
+    v_alpha[vbase + 1u] = alpha;
+    v_alpha[vbase + 2u] = alpha;
+    v_alpha[vbase + 3u] = alpha;
+
+    gl_PrimitiveTriangleIndicesEXT[pbase + 0u] = uvec3(vbase + 0u, vbase + 1u, vbase + 2u);
+    gl_PrimitiveTriangleIndicesEXT[pbase + 1u] = uvec3(vbase + 0u, vbase + 2u, vbase + 3u);
+}

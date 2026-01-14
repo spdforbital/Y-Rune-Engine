@@ -1,0 +1,53 @@
+#version 450
+
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D inputDepth;
+layout(binding = 1, r32f) uniform writeonly image2D outputDepth;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Output size
+    ivec2 outSize = imageSize(outputDepth);
+    
+    if (pos.x >= outSize.x || pos.y >= outSize.y) {
+        return;
+    }
+
+    // Input is usually 2x larger
+    // We want the max depth of the 4 texels (conservative culling: occluder must be closer than all 4)
+    // Wait, if 1.0 is far, max(z) gives the FARTHEST point.
+    // An object is occluded if its NEAREST point is > FARTHEST point of occluder.
+    // So yes, max(z) is correct for "farthest depth" in standard [0,1] depth.
+    // But Vulkan standard depth is 0=near, 1=far.
+    
+    // Texture sampling with gather or just texelFetch
+    // Calculate input coordinates
+    // We assume the previous mip is bound as inputDepth.
+    
+    // texelFetch uses unnormalized coordinates 0..w, 0..h
+    // Current pos corresponds to 2*pos in previous mip
+    ivec2 inputPos = pos * 2;
+    
+    vec4 depths;
+    depths.x = texelFetch(inputDepth, inputPos + ivec2(0, 0), 0).r;
+    depths.y = texelFetch(inputDepth, inputPos + ivec2(1, 0), 0).r;
+    depths.z = texelFetch(inputDepth, inputPos + ivec2(0, 1), 0).r;
+    depths.w = texelFetch(inputDepth, inputPos + ivec2(1, 1), 0).r;
+    
+    // In case input size is odd, we might read out of bounds. 
+    // texelFetch handles this by clamping or returning edge? 
+    // "The results of the lookup are undefined if the specified coordinate is out of bounds."
+    // We should clamp to input size.
+    ivec2 inSize = textureSize(inputDepth, 0);
+    
+    float d0 = texelFetch(inputDepth, min(inputPos + ivec2(0, 0), inSize - 1), 0).r;
+    float d1 = texelFetch(inputDepth, min(inputPos + ivec2(1, 0), inSize - 1), 0).r;
+    float d2 = texelFetch(inputDepth, min(inputPos + ivec2(0, 1), inSize - 1), 0).r;
+    float d3 = texelFetch(inputDepth, min(inputPos + ivec2(1, 1), inSize - 1), 0).r;
+    
+    float maxDepth = max(max(d0, d1), max(d2, d3));
+    
+    imageStore(outputDepth, pos, vec4(maxDepth, 0.0, 0.0, 0.0));
+}

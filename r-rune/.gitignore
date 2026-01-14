@@ -1,0 +1,8 @@
+/target
+.vscode/
+.idea/
+*.rs.bk
+.DS_Store
+*.log
+.gemini/
+.agent/

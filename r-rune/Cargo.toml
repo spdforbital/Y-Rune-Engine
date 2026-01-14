@@ -1,0 +1,28 @@
+[package]
+name = "r-rune"
+version = "0.1.0"
+edition = "2024"
+default-run = "r-rune"
+
+[dependencies]
+ash = { version = "0.38", features = ["linked"] }
+ash-window = "0.13"
+winit = { version = "0.29", features = ["rwh_06"] }
+raw-window-handle = "0.6"
+glam = { version = "0.25", features = ["bytemuck"] }
+tobj = "4.0"
+# meshopt-rs is the rust binding for meshoptimizer
+meshopt = { version = "0.1", package = "meshopt-rs", features = ["experimental"] } 
+shaderc = "0.8"
+log = "0.4"
+env_logger = "0.10"
+bytemuck = { version = "1.14", features = ["derive"] }
+gltf = "1.4"
+image = "0.24"
+rusttype = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+ron = "0.8"
+hecs = "0.10"
+rayon = "1.11"

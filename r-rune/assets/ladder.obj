@@ -1,0 +1,16 @@
+# Ladder
+# Width: 0.8
+# Height: 3.0
+# Rungs every 0.3
+
+# Left Rail
+v -0.4 0.0 0.0
+v -0.4 3.0 0.0
+# Right Rail
+v 0.4 0.0 0.0
+v 0.4 3.0 0.0
+
+# Face (Simple quad for now)
+f 1 3 4 2
+
+# Collider should be extracted from this

@@ -1,0 +1,160 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 64) in;
+layout(triangles, max_vertices = 256, max_primitives = 128) out;
+
+layout(push_constant) uniform PushConstants {
+    mat4 view_proj;
+    vec4 camera_time; // xyz = camera pos, w = time
+    vec4 wind_params; // xy = dir, z = speed, w = turbulence
+    vec4 spawn_params; // x = radius, y = height, z = ground, w = fall_speed
+    vec4 flake_params; // x = size, y = unused, z = alpha_scale, w = unused
+} pc;
+
+layout(location = 0) out vec2 v_uv[];
+layout(location = 1) out float v_alpha[];
+layout(location = 2) out float v_rotation[]; // Random rotation for flake
+
+const uint FLAKES_PER_GROUP = 64u;
+const uint VERTS_PER_FLAKE = 4u;
+const uint PRIMS_PER_FLAKE = 2u;
+
+// Hash functions for randomization
+uint hash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float rand01(uint x) {
+    return float(hash(x)) / 4294967295.0;
+}
+
+void main() {
+    if (pc.flake_params.z <= 0.0 || pc.spawn_params.y <= 0.0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+
+    SetMeshOutputsEXT(FLAKES_PER_GROUP * VERTS_PER_FLAKE, FLAKES_PER_GROUP * PRIMS_PER_FLAKE);
+
+    uint lid = gl_LocalInvocationID.x;
+    uint id = gl_WorkGroupID.x * FLAKES_PER_GROUP + lid;
+
+    // Random seeds
+    float r1 = rand01(id * 9781u);
+    float r2 = rand01(id * 6271u + 23u);
+    float r3 = rand01(id * 9127u + 17u);
+    float r4 = rand01(id * 1987u + 59u);
+    float r5 = rand01(id * 3571u + 101u);
+
+    // Spawn parameters
+    float radius = sqrt(r1) * pc.spawn_params.x;
+    float theta = r2 * 6.2831853;
+    vec2 offset = vec2(cos(theta), sin(theta)) * radius;
+
+    float height = max(pc.spawn_params.y, 0.1);
+    float ground = pc.spawn_params.z;
+    float fall_speed = max(pc.spawn_params.w, 0.1) * mix(0.8, 1.2, r3); // Vary speed slightly
+    float base_y = max(ground, pc.camera_time.y - height * 0.3);
+
+    // Physics
+    float travel = pc.camera_time.w * fall_speed + r3 * height;
+    float fall_dist = mod(travel, height);
+    float y = base_y + height - fall_dist; // Wrap around height
+
+    // Wind
+    vec2 wind_dir = vec2(pc.wind_params.x, pc.wind_params.y);
+    float wind_len = length(wind_dir);
+    vec2 wind_norm = wind_len > 0.001 ? wind_dir / wind_len : vec2(0.0);
+    vec2 wind = wind_norm * pc.wind_params.z;
+
+    // Turbulence / Sway (Sine wave based on time and random seed)
+    float time = pc.camera_time.w;
+    float turbulence = pc.wind_params.w;
+    // Multi-frequency sway for realism
+    vec2 sway = vec2(
+        sin(time * 1.5 + r4 * 10.0) + sin(time * 3.5 + r5 * 20.0) * 0.5,
+        cos(time * 1.2 + r5 * 10.0) + cos(time * 3.1 + r4 * 20.0) * 0.5
+    ) * turbulence * 0.5;
+
+    // Drift due to wind (integrated over fall time)
+    float fall_time = fall_dist / fall_speed;
+    vec2 drift = wind * fall_time;
+
+    // Final Position
+    vec3 pos = vec3(
+        pc.camera_time.x + offset.x + drift.x + sway.x,
+        y,
+        pc.camera_time.z + offset.y + drift.y + sway.y
+    );
+
+    // Billboarding: Quad always faces camera
+    // Simple billboard: Align with view plane.
+    // We can extract camera right and up vectors from view matrix? 
+    // Or just use billboard logic:
+    // View matrix [0][0], [1][0], [2][0] is right vector (transposed)
+    // Actually better to reconstruct in View Space or just use inverse View.
+    // Or simpler: just use (1,0,0) and (0,1,0) in View Space.
+    // Here we emit world space vertices.
+    
+    // Let's compute camera Right and Up from ViewProj? No, View Matrix is needed.
+    // We only have ViewProj.
+    // Hack: Look at camera pos.
+    vec3 to_cam = normalize(pc.camera_time.xyz - pos);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 right = normalize(cross(to_cam, up));
+    vec3 real_up = cross(right, to_cam); // for proper billboard perpendicular to view
+    
+    // Vary flake size
+    float size = pc.flake_params.x * mix(0.5, 1.5, r5);
+    vec3 half_right = right * size * 0.5;
+    vec3 half_up = real_up * size * 0.5;
+
+    // Vertices
+    uint vbase = lid * VERTS_PER_FLAKE;
+    uint pbase = lid * PRIMS_PER_FLAKE;
+
+    vec3 v0 = pos - half_right - half_up;
+    vec3 v1 = pos + half_right - half_up;
+    vec3 v2 = pos + half_right + half_up;
+    vec3 v3 = pos - half_right + half_up;
+
+    gl_MeshVerticesEXT[vbase + 0u].gl_Position = pc.view_proj * vec4(v0, 1.0);
+    gl_MeshVerticesEXT[vbase + 1u].gl_Position = pc.view_proj * vec4(v1, 1.0);
+    gl_MeshVerticesEXT[vbase + 2u].gl_Position = pc.view_proj * vec4(v2, 1.0);
+    gl_MeshVerticesEXT[vbase + 3u].gl_Position = pc.view_proj * vec4(v3, 1.0);
+
+    // UVs
+    v_uv[vbase + 0u] = vec2(0.0, 0.0);
+    v_uv[vbase + 1u] = vec2(1.0, 0.0);
+    v_uv[vbase + 2u] = vec2(1.0, 1.0);
+    v_uv[vbase + 3u] = vec2(0.0, 1.0);
+
+    // Alpha/Fade
+    float dist = length(pc.camera_time.xyz - pos);
+    float near_fade = smoothstep(0.5, 2.0, dist);
+    float far_fade = 1.0 - smoothstep(pc.spawn_params.x * 0.8, pc.spawn_params.x, dist);
+    
+    float alpha = pc.flake_params.z * near_fade * far_fade * mix(0.5, 1.0, r1);
+
+    v_alpha[vbase + 0u] = alpha;
+    v_alpha[vbase + 1u] = alpha;
+    v_alpha[vbase + 2u] = alpha;
+    v_alpha[vbase + 3u] = alpha;
+
+    // Rotation (passed to frag)
+    float rotation = r2 * 6.28 + time * mix(-1.0, 1.0, r3); 
+    v_rotation[vbase + 0u] = rotation;
+    v_rotation[vbase + 1u] = rotation;
+    v_rotation[vbase + 2u] = rotation;
+    v_rotation[vbase + 3u] = rotation;
+
+    // Indices
+    gl_PrimitiveTriangleIndicesEXT[pbase + 0u] = uvec3(vbase + 0u, vbase + 1u, vbase + 2u);
+    gl_PrimitiveTriangleIndicesEXT[pbase + 1u] = uvec3(vbase + 0u, vbase + 2u, vbase + 3u);
+}

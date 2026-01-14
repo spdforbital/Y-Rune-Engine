@@ -1,0 +1,21 @@
+(
+    models: [],
+    ai: [],
+    triggers: [],
+    gui: [
+        (
+            id: "play_btn",
+            text: "Play Game",
+            position: (0.0, 0.0),
+            scale: 1.0,
+            action: Some("load_scene:scene2"),
+        ),
+        (
+            id: "settings_btn",
+            text: "Settings",
+            position: (0.0, 0.2),
+            scale: 0.6,
+            action: Some("load_scene:scene3"),
+        ),
+    ],
+)

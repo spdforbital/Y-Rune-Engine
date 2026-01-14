@@ -1,0 +1,142 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_8bit_storage : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(triangles) out;
+layout(max_vertices = 64, max_primitives = 124) out;
+
+struct Meshlet {
+    uint vertex_offset;
+    uint triangle_offset;
+    uint vertex_count;
+    uint triangle_count;
+    vec4 center_radius;
+};
+
+// Bindings match C++ side
+layout(binding = 0) readonly buffer Meshlets {
+    Meshlet meshlets[];
+};
+
+layout(binding = 1) readonly buffer Vertices {
+    float vertices[]; // x,y,z, x,y,z...
+};
+
+layout(binding = 2) readonly buffer MeshletVertices {
+    uint meshletVertices[];
+};
+
+layout(binding = 3) readonly buffer MeshletTriangles {
+    uint meshletTriangles[]; // Indices
+};
+
+layout(binding = 14) readonly buffer MeshletParams {
+    uint meshletModelIndices[];
+};
+
+struct GpuMaterial {
+    vec4 color;
+    vec4 params;
+    vec4 offset;
+    vec4 base_position;
+    vec4 rotation;
+};
+
+layout(binding = 10) readonly buffer Materials {
+    GpuMaterial materials[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 mvp;
+    uint meshlet_count;
+    uint hovered_id; 
+    float outline_width; 
+    uint meshlet_offset;
+    vec4 sun_dir;   // xyz direction, w intensity
+    vec4 camera_pos;
+    vec4 sun_color;
+} pc;
+
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+layout(location = 0) out vec2 v_uv[];
+layout(location = 1) out float v_material[];
+layout(location = 2) out vec3 v_normal[];
+layout(location = 3) out vec3 v_world[];
+layout(location = 4) out float v_opacity[];
+layout(location = 5) flat out uint v_mat_idx[];
+
+vec3 quat_rotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+void main() {
+    uint taskMeshletIndex = payload.meshletIndices[gl_WorkGroupID.x];
+    Meshlet m = meshlets[taskMeshletIndex];
+    uint model_idx = meshletModelIndices[taskMeshletIndex];
+    GpuMaterial model_mat = materials[model_idx];
+    vec3 base_pos = model_mat.base_position.xyz;
+    vec3 rb_offset = model_mat.offset.xyz;
+    vec4 rot = model_mat.rotation;
+
+    SetMeshOutputsEXT(m.vertex_count, m.triangle_count);
+
+    uint laneId = gl_LocalInvocationID.x;
+
+    // Process Vertices
+    // Stride is now 12 floats (48 bytes): pos(3), normal(3), uv(2), data(4)
+    for (uint i = laneId; i < m.vertex_count; i += 32) {
+        uint vertexIndex = meshletVertices[m.vertex_offset + i];
+        
+        uint base = vertexIndex * 12;
+        vec3 pos = vec3(vertices[base + 0],
+                        vertices[base + 1],
+                        vertices[base + 2]);
+        vec3 vnorm = vec3(vertices[base + 3],
+                          vertices[base + 4],
+                          vertices[base + 5]);
+        
+        float material = vertices[base + 8]; // data[0]
+        float opacity = vertices[base + 9]; // data[1]
+        uint mat_idx = uint(vertices[base + 10]); // data[2]
+
+        // Apply dynamic model transform
+        vec3 local_pos = pos - base_pos;
+        vec3 rotated_pos = quat_rotate(rot, local_pos) + base_pos + rb_offset;
+        vec3 rotated_norm = quat_rotate(rot, vnorm);
+
+        // Apply Outline Extrusion
+        if (pc.outline_width > 0.0) {
+            // Extrude along vertex normal
+            rotated_pos += normalize(rotated_norm) * pc.outline_width;
+        }
+
+        gl_MeshVerticesEXT[i].gl_Position = pc.mvp * vec4(rotated_pos, 1.0);
+        v_world[i] = rotated_pos;
+        
+        vec2 uv = vec2(vertices[base + 6], vertices[base + 7]);
+        v_uv[i] = uv;
+        // Output smooth normal
+        v_normal[i] = normalize(rotated_norm);
+        v_material[i] = material;
+        v_opacity[i] = opacity;
+        v_mat_idx[i] = mat_idx;
+    }
+
+    // Process Primitives
+    for (uint i = laneId; i < m.triangle_count; i += 32) {
+        // Indices are packed as uint8_t in buffer
+        uint trip0 = uint(meshletTriangles[m.triangle_offset + i * 3 + 0]);
+        uint trip1 = uint(meshletTriangles[m.triangle_offset + i * 3 + 1]);
+        uint trip2 = uint(meshletTriangles[m.triangle_offset + i * 3 + 2]);
+
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(trip0, trip1, trip2);
+    }
+}

@@ -1,0 +1,41 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D inputTexture; // Smaller mip
+layout(binding = 1, rgba16f) uniform image2D outputImage; // Current mip (accumulate)
+
+layout(push_constant) uniform PushConstants {
+    float filter_radius;
+};
+
+void main() {
+    ivec2 out_size = imageSize(outputImage);
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+
+    if (id.x >= out_size.x || id.y >= out_size.y) {
+        return;
+    }
+
+    vec2 uv = (vec2(id) + 0.5) / vec2(out_size);
+    
+    // Tent filter 
+    float radius = filter_radius;
+    vec4 sum = vec4(0.0);
+    // ... Implement offsets ...
+    // Simple toggle for now: bilinear sample
+    vec4 upsampled = texture(inputTexture, uv);
+
+    // Additive blend with existing content in outputImage?
+    // Usually bloom upsample chain adds previous mip to current.
+    // However, if we store intermediate results in separate textures.
+    // Let's assume inputTexture is the "blurred smaller" image, and we Add it to the "current larger" image?
+    // Or we just output to a destination.
+    // Standard approach:
+    // Mip N -> Mip N-1: Mix(Mip N-1, Blur(Mip N))
+    // Here we just write `upsampled`?
+    // Let's implement simple additive blend: Load, Add, Store.
+    
+    vec4 existing = imageLoad(outputImage, id);
+    imageStore(outputImage, id, existing + upsampled);
+}

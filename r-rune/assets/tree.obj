@@ -1,0 +1,54 @@
+# Simple Low Poly Tree with UVs
+# Vertices
+# Trunk Bottom
+v -0.2 0.0 -0.2
+v 0.2 0.0 -0.2
+v 0.2 0.0 0.2
+v -0.2 0.0 0.2
+# Trunk Top
+v -0.2 1.5 -0.2
+v 0.2 1.5 -0.2
+v 0.2 1.5 0.2
+v -0.2 1.5 0.2
+# Foliage Base
+v -1.0 1.5 -1.0
+v 1.0 1.5 -1.0
+v 1.0 1.5 1.0
+v -1.0 1.5 1.0
+# Foliage Top
+v 0.0 4.5 0.0
+
+# UVs
+# Bark area (Left side, x=0.0 to 0.5)
+vt 0.1 0.1
+vt 0.4 0.1
+vt 0.4 0.9
+vt 0.1 0.9
+
+# Leaves area (Right side, x=0.5 to 1.0)
+vt 0.6 0.1
+vt 0.9 0.1
+vt 0.9 0.9
+vt 0.6 0.9
+vt 0.75 0.5 # Center for top
+
+# Normals (Up)
+vn 0.0 1.0 0.0
+# Side normals would be better but keeping simple
+
+# Faces
+# Trunk Sides (Mapping to Bark UVs: 1-4)
+f 1/1/1 5/4/1 6/3/1 2/2/1
+f 2/1/1 6/4/1 7/3/1 3/2/1
+f 3/1/1 7/4/1 8/3/1 4/2/1
+f 4/1/1 8/4/1 5/3/1 1/2/1
+# Trunk Bottom
+f 4/1/1 3/2/1 2/2/1 1/1/1
+
+# Foliage Base (Mapping to Leaves UVs: 5-8)
+f 9/5/1 12/8/1 11/7/1 10/6/1
+# Foliage Sides (Tip maps to 9)
+f 9/5/1 10/6/1 13/9/1
+f 10/6/1 11/7/1 13/9/1
+f 11/7/1 12/8/1 13/9/1
+f 12/8/1 9/5/1 13/9/1

@@ -1,0 +1,187 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct Meshlet {
+    uint vertex_offset;
+    uint triangle_offset;
+    uint vertex_count;
+    uint triangle_count;
+    vec4 center_radius;
+};
+
+layout(binding = 0) readonly buffer Meshlets {
+    Meshlet meshlets[];
+};
+
+layout(binding = 14) readonly buffer MeshletParams {
+    uint meshletModelIndices[];
+};
+
+struct GpuMaterial {
+    vec4 color;
+    vec4 params;
+    vec4 offset;
+    vec4 base_position;
+    vec4 rotation;
+};
+
+layout(binding = 10) readonly buffer Materials {
+    GpuMaterial materials[];
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 mvp;
+    uint meshlet_count;
+    uint hovered_id;
+    float outline_width;
+    uint meshlet_offset;
+    vec4 sun_dir;   // xyz direction, w intensity
+    vec4 camera_pos;
+    vec4 sun_color;
+} pc;
+
+// SPHERE_FLAG_OFFSET removed
+
+// Payload passed to mesh shader
+struct TaskPayload {
+    uint meshletIndices[32];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+shared uint meshletCount;
+
+struct BoundsInfo {
+    vec3 center_ndc;
+    float radius_ndc;
+    bool valid;
+};
+
+vec3 quat_rotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+BoundsInfo compute_bounds(in Meshlet m, uint meshletId) {
+    BoundsInfo b;
+    b.valid = false;
+
+    vec3 center = m.center_radius.xyz;
+    float radius = m.center_radius.w;
+    
+    // Apply dynamic model transform
+    uint model_idx = meshletModelIndices[meshletId];
+    GpuMaterial mat = materials[model_idx];
+    vec3 base_pos = mat.base_position.xyz;
+    vec3 offset = mat.offset.xyz;
+    vec4 rot = mat.rotation;
+
+    vec3 local_center = center - base_pos;
+    vec3 rotated_center = quat_rotate(rot, local_center);
+    center = rotated_center + base_pos + offset;
+
+    vec4 center_clip = pc.mvp * vec4(center, 1.0);
+    float w = abs(center_clip.w);
+    if (w < 1e-5) {
+        return b;
+    }
+
+    // Estimate projected radius using the largest column scale of MVP.
+    float scale_x = length(pc.mvp[0].xyz);
+    float scale_y = length(pc.mvp[1].xyz);
+    float scale_z = length(pc.mvp[2].xyz);
+    float max_scale = max(scale_x, max(scale_y, scale_z));
+
+    b.center_ndc = center_clip.xyz / w;
+    b.radius_ndc = radius * max_scale / w;
+    b.valid = true;
+    return b;
+}
+
+bool lod_cull(in BoundsInfo b) {
+    if (!b.valid) return true;
+    const float MIN_RADIUS_NDC = 0.00001; // Was 0.0005. Relaxed further for small rocks.
+    return b.radius_ndc >= MIN_RADIUS_NDC;
+}
+
+layout(binding = 8) uniform sampler2D hizBuffer;
+
+bool occlusion_cull(in BoundsInfo b) {
+    if (!b.valid) return true;
+    
+    // Project bounding sphere to screen box
+    // Center in NDC [-1, 1]
+    // Radius in NDC
+    
+    // NDC -> UV [0, 1]
+    vec2 uv_center = b.center_ndc.xy * 0.5 + 0.5;
+    vec2 uv_radius = vec2(b.radius_ndc * 0.5); 
+    
+    // Bounding box in UV
+    vec2 min_uv = clamp(uv_center - uv_radius, 0.0, 1.0);
+    vec2 max_uv = clamp(uv_center + uv_radius, 0.0, 1.0);
+    vec2 size_uv = max_uv - min_uv;
+    
+    // Check if empty
+    if (size_uv.x <= 0.0 || size_uv.y <= 0.0) return false;
+    
+    // Calculate LOD
+    ivec2 hizSize = textureSize(hizBuffer, 0);
+    float max_dim = max(size_uv.x * hizSize.x, size_uv.y * hizSize.y);
+    float lod = ceil(log2(max_dim));
+    
+    // Fetch depth
+    float d1 = textureLod(hizBuffer, vec2(min_uv.x, min_uv.y), lod).r;
+    float d2 = textureLod(hizBuffer, vec2(max_uv.x, min_uv.y), lod).r;
+    float d3 = textureLod(hizBuffer, vec2(min_uv.x, max_uv.y), lod).r;
+    float d4 = textureLod(hizBuffer, vec2(max_uv.x, max_uv.y), lod).r;
+    
+    float max_depth = max(max(d1, d2), max(d3, d4));
+    
+    return true; // DEBUG: Force Visible
+}
+
+void main() {
+    uint threadId = gl_LocalInvocationID.x;
+    uint meshletId = gl_GlobalInvocationID.x + pc.meshlet_offset;
+
+    if (threadId == 0) {
+        meshletCount = 0;
+    }
+    barrier();
+
+    if (meshletId >= pc.meshlet_count) {
+        return;
+    }
+
+    Meshlet m = meshlets[meshletId];
+    BoundsInfo bounds = compute_bounds(m, meshletId);
+    bool visible = bounds.valid;
+
+    if (visible) {
+        // NDC frustum check; Vulkan clip Z is [0, 1].
+        float r = bounds.radius_ndc;
+        vec3 c = bounds.center_ndc;
+        if (c.x + r < -1.0 || c.x - r > 1.0) visible = false;
+        if (c.y + r < -1.0 || c.y - r > 1.0) visible = false;
+        if (c.z + r < 0.0 || c.z - r > 1.0) visible = false;
+    }
+
+    visible = visible && lod_cull(bounds);
+    visible = visible && occlusion_cull(bounds);
+
+    if (visible) {
+        uint index = atomicAdd(meshletCount, 1);
+        if (index < 32) {
+            payload.meshletIndices[index] = meshletId;
+        }
+    }
+    
+    barrier();
+
+    if (threadId == 0 && meshletCount > 0) {
+        EmitMeshTasksEXT(meshletCount, 1, 1);
+    }
+}

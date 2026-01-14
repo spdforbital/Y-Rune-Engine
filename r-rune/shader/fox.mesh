@@ -1,0 +1,106 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(triangles) out;
+layout(max_vertices = 64, max_primitives = 124) out;
+
+struct Meshlet {
+    uint vertex_offset;
+    uint triangle_offset;
+    uint vertex_count;
+    uint triangle_count;
+    vec4 center_radius;
+};
+
+struct FoxVertex {
+    vec3 pos;
+    float _pad0;
+    vec3 normal;
+    float _pad1;
+    vec2 uv;
+    vec2 _pad2;
+    uvec4 joints;
+    vec4 weights;
+};
+
+layout(binding = 0) readonly buffer Meshlets {
+    Meshlet meshlets[];
+};
+layout(binding = 1) readonly buffer Vertices {
+    FoxVertex vertices[];
+};
+layout(binding = 2) readonly buffer MeshletVertices {
+    uint meshlet_vertices[];
+};
+layout(binding = 3) readonly buffer MeshletTriangles {
+    uint meshlet_triangles[];
+};
+layout(binding = 4) readonly buffer Bones {
+    mat4 bones[];
+};
+
+layout(push_constant) uniform FoxPC {
+    mat4 mvp;
+    vec4 sun_dir;
+    vec4 sun_color;
+    vec4 model_pos_scale;
+    vec4 model_rot;
+} pc;
+
+layout(location = 0) out vec3 v_normal[];
+layout(location = 1) out vec2 v_uv[];
+layout(location = 2) out vec3 v_world[];
+
+vec3 quat_rotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+void main() {
+    uint meshlet_index = gl_WorkGroupID.x;
+    uint meshlet_count = uint(pc.sun_color.w + 0.5);
+    if (meshlet_index >= meshlet_count) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+
+    Meshlet m = meshlets[meshlet_index];
+    if (m.vertex_count == 0 || m.triangle_count == 0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+
+    SetMeshOutputsEXT(m.vertex_count, m.triangle_count);
+
+    uint lane = gl_LocalInvocationID.x;
+
+    for (uint i = lane; i < m.vertex_count; i += gl_WorkGroupSize.x) {
+        uint vertex_index = meshlet_vertices[m.vertex_offset + i];
+        FoxVertex v = vertices[vertex_index];
+
+        mat4 skin =
+              bones[v.joints.x] * v.weights.x
+            + bones[v.joints.y] * v.weights.y
+            + bones[v.joints.z] * v.weights.z
+            + bones[v.joints.w] * v.weights.w;
+
+        vec4 skinned_pos = skin * vec4(v.pos, 1.0);
+        vec3 skinned_normal = normalize(mat3(skin) * v.normal);
+        vec3 world_pos = quat_rotate(pc.model_rot, skinned_pos.xyz * pc.model_pos_scale.w)
+            + pc.model_pos_scale.xyz;
+        vec3 world_normal = normalize(quat_rotate(pc.model_rot, skinned_normal));
+
+        gl_MeshVerticesEXT[i].gl_Position = pc.mvp * skinned_pos;
+        v_normal[i] = world_normal;
+        v_uv[i] = v.uv;
+        v_world[i] = world_pos;
+    }
+
+    for (uint i = lane; i < m.triangle_count; i += gl_WorkGroupSize.x) {
+        uint i0 = meshlet_triangles[m.triangle_offset + i * 3 + 0];
+        uint i1 = meshlet_triangles[m.triangle_offset + i * 3 + 1];
+        uint i2 = meshlet_triangles[m.triangle_offset + i * 3 + 2];
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(i0, i1, i2);
+    }
+}

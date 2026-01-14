@@ -1,0 +1,55 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1) in;
+layout(triangles, max_vertices = 24, max_primitives = 12) out;
+
+layout(push_constant) uniform PushConstants {
+    mat4 mvp;
+    vec4 camera_pos;
+    float time;
+    vec3 pad;
+} pc;
+
+layout(location = 0) out vec3 v_localPos[];
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    if (lid > 0) return;
+
+    // Emit a generic cube [-0.5, 0.5]
+    vec3 vertices[8] = vec3[](
+        vec3(-0.5, -0.5,  0.5),
+        vec3( 0.5, -0.5,  0.5),
+        vec3( 0.5,  0.5,  0.5),
+        vec3(-0.5,  0.5,  0.5),
+        vec3(-0.5, -0.5, -0.5),
+        vec3( 0.5, -0.5, -0.5),
+        vec3( 0.5,  0.5, -0.5),
+        vec3(-0.5,  0.5, -0.5)
+    );
+
+    // Indices for 12 triangles (cube)
+    // Front, Right, Back, Left, Top, Bottom
+    uint indices[36] = uint[](
+        0, 1, 2, 2, 3, 0, // Front
+        1, 5, 6, 6, 2, 1, // Right
+        5, 4, 7, 7, 6, 5, // Back
+        4, 0, 3, 3, 7, 4, // Left
+        3, 2, 6, 6, 7, 3, // Top
+        4, 5, 1, 1, 0, 4  // Bottom
+    );
+
+    SetMeshOutputsEXT(24, 12);
+
+    // Transform vertices
+    for (int i = 0; i < 8; ++i) {
+        gl_MeshVerticesEXT[i].gl_Position = pc.mvp * vec4(vertices[i], 1.0);
+        v_localPos[i] = vertices[i]; // Pass local position
+    }
+    
+    // Primitives
+    for (int i = 0; i < 12; ++i) {
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(indices[i*3], indices[i*3+1], indices[i*3+2]);
+    }
+}
